@@ -300,10 +300,10 @@ def get_row_dates(sec):
             elif isinstance(val, date): d = val
             elif val:
                 raw = str(val).strip()
-            for fmt in ('%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
-                        '%B %d, %Y', '%m/%d/%Y %H:%M', '%m/%d/%Y', '%d/%m/%Y %H:%M', '%d/%m/%Y'):
-                try: d = datetime.strptime(raw, fmt).date(); break
-                except: pass
+                for fmt in ('%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
+                            '%B %d, %Y', '%m/%d/%Y %H:%M', '%m/%d/%Y', '%d/%m/%Y %H:%M', '%d/%m/%Y'):
+                    try: d = datetime.strptime(raw, fmt).date(); break
+                    except: pass
             result[ref] = d
         return result
     return {}
@@ -377,11 +377,51 @@ def build_summary(wb, sections, date_range, pel_by_ref):
             key=lambda x: x['merchant']
         )
         for sec in merch_sections:
+            sec_grand = defaultdict(float)
+            dated_refs = set()
+            row_dates = get_row_dates(sec)
+            s_headers, schema, s_idx = sec['headers'], sec['schema'], sec['s_idx']
+
+            for d in days:
+                st = daily_stats_for_sec(sec, d, pel_by_ref)
+                for gk in ['settle_rows', 'matched_rows', 'settle_total', 'pelpay_total',
+                            'diff_total', 'exc_count', 'exc_amt']:
+                    sec_grand[gk] += st[gk]
+                    grand[cur][gk] += st[gk]
+                for sr in sec['rows']:
+                    ref = norm(sr[s_headers.index(schema['ref'])])
+                    if row_dates.get(ref) == d:
+                        dated_refs.add(ref)
+
+            # Catch rows whose dates fall outside the settlement date range
+            other_rows = [sr for sr in sec['rows'] if norm(sr[s_headers.index(schema['ref'])]) not in dated_refs]
+            other_matched_refs = {norm(m[0][m[3][m[4]['ref']]]) for m in sec['matched']} - dated_refs
+            other_matched_count = len(other_matched_refs)
+            if other_rows:
+                other_settle_amt = sum(sr[s_idx[schema['amount']]] for sr in other_rows)
+                other_pelpay_amt = sum(m[1]['amount'] for m in sec['matched']
+                                       if norm(m[0][m[3][m[4]['ref']]]) in other_matched_refs)
+                for gk, val in [('settle_rows', len(other_rows)), ('matched_rows', other_matched_count),
+                                 ('settle_total', other_settle_amt), ('pelpay_total', other_pelpay_amt),
+                                 ('diff_total', other_settle_amt - other_pelpay_amt)]:
+                    sec_grand[gk] += val
+                    grand[cur][gk] += val
+
+            if not sec_grand.get('settle_rows') and not sec_grand.get('matched_rows'):
+                continue
+
             ws.cell(r, 1, value=sec['merchant']).font = Font(bold=True, size=12)
             r += 1
             write_header_row(ws, r, sum_headers); r += 1
 
-            sec_grand = defaultdict(float)
+            if other_rows:
+                vals = ['Other Dates', cur, len(other_rows), other_matched_count,
+                        other_settle_amt, other_pelpay_amt,
+                        other_settle_amt - other_pelpay_amt,
+                        '', '', 'PARTIAL', sec['gw']]
+                for c, v in enumerate(vals, 1): ws.cell(r, c, v)
+                r += 1
+
             for d in days:
                 st = daily_stats_for_sec(sec, d, pel_by_ref)
                 if not st['settle_rows'] and not st['matched_rows']:
@@ -392,11 +432,6 @@ def build_summary(wb, sections, date_range, pel_by_ref):
                         st['exc_count'], st['exc_amt'], 'PARTIAL', sec['gw']]
                 for c, v in enumerate(vals, 1): ws.cell(r, c, v)
                 r += 1
-
-                for gk in ['settle_rows', 'matched_rows', 'settle_total', 'pelpay_total',
-                            'diff_total', 'exc_count', 'exc_amt']:
-                    sec_grand[gk] += st[gk]
-                    grand[cur][gk] += st[gk]
 
             if sec_grand:
                 vals = [f'{cur} TOTAL', None, sec_grand['settle_rows'], sec_grand['matched_rows'],

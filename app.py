@@ -59,8 +59,9 @@ def classify_file(headers):
 
     return None
 
-def read_currency_from_file(fpath, cur_col_header):
-    """Read currency from first data row of given column."""
+def read_currencies_from_file(fpath, cur_col_header):
+    """Scan all data rows and return set of currencies found."""
+    currencies = set()
     ext = os.path.splitext(fpath)[1].lower()
     try:
         if ext == '.csv':
@@ -71,21 +72,20 @@ def read_currency_from_file(fpath, cur_col_header):
                     ci = h.index(cur_col_header)
                     for row in reader:
                         if row and len(row) > ci and row[ci]:
-                            return str(row[ci]).strip().upper()
-                        break
+                            currencies.add(str(row[ci]).strip().upper())
         else:
             wb = openpyxl.load_workbook(fpath, data_only=True)
             ws = wb[wb.sheetnames[0]]
             h = [str(c.value).strip().lower() for c in ws[1]]
             if cur_col_header in h:
                 ci = h.index(cur_col_header)
-                for row in ws.iter_rows(min_row=2, max_row=2, values_only=True):
+                for row in ws.iter_rows(min_row=2, values_only=True):
                     if row[ci]:
-                        return str(row[ci]).strip().upper()
+                        currencies.add(str(row[ci]).strip().upper())
             wb.close()
     except Exception:
         pass
-    return None
+    return currencies
 
 def currency_from_filename(fpath):
     name = os.path.basename(fpath).upper()
@@ -157,18 +157,21 @@ if uploaded_files:
                     })
                 continue
 
-            # Settlement file
+            # Settlement file — detect all currencies present
+            currencies = set()
             if cur_col:
-                currency = read_currency_from_file(tpath, cur_col)
-            if not currency:
-                currency = currency_from_filename(tpath)
-            if not currency:
-                currency = '?'
+                currencies = read_currencies_from_file(tpath, cur_col)
+            if not currencies:
+                c = currency_from_filename(tpath)
+                if c: currencies.add(c)
+            if not currencies:
+                currencies.add('?')
 
-            settlements.append({
-                'file': f, 'path': tpath, 'name': f.name,
-                'gateway': gw, 'currency': currency, 'status': 'OK',
-            })
+            for currency in sorted(currencies):
+                settlements.append({
+                    'file': f, 'path': tpath, 'name': f.name,
+                    'gateway': gw, 'currency': currency, 'status': 'OK',
+                })
         except Exception as e:
             settlements.append({
                 'file': f, 'path': tpath, 'name': f.name,
@@ -177,13 +180,11 @@ if uploaded_files:
             })
 
     # ── File checklist ────────────────────────────────────
-    expected = {
-        ('CYBERSOURCE', 'NGN'): 'Cybersource NGN',
-        ('CYBERSOURCE', 'USD'): 'Cybersource USD',
-        ('CHOICEPAY', 'NGN'): 'ChoicePay/MPGS NGN',
-        ('CHOICEPAY', 'USD'): 'ChoicePay/MPGS USD',
-    }
-    detected_settlements = {(s['gateway'], s['currency']) for s in settlements if s['gateway'] and s['status'] == 'OK' and s['currency'] and s['currency'] != '?'}
+    gateways = ['CYBERSOURCE', 'CHOICEPAY']
+    gw_currencies = defaultdict(set)
+    for s in settlements:
+        if s['gateway'] and s['status'] == 'OK' and s['currency'] and s['currency'] != '?':
+            gw_currencies[s['gateway']].add(s['currency'])
 
     st.subheader('Files Required')
     req_cols = st.columns(2)
@@ -192,25 +193,33 @@ if uploaded_files:
     with req_cols[1]:
         st.markdown(f"{pelpay_file['name'] if pelpay_file else '— missing —'}")
 
-    for col_idx, (gw_cur, label) in enumerate(expected.items()):
-        found = gw_cur in detected_settlements
-        with req_cols[col_idx % 2]:
-            st.markdown(f"{'✅' if found else '❌'} **{label}**")
-            if found:
-                names = [s['name'] for s in settlements if s['gateway'] == gw_cur[0] and s['currency'] == gw_cur[1] and s['status'] == 'OK']
-                st.caption(', '.join(names))
-            else:
-                st.caption('— missing —')
+    for gw in gateways:
+        curs = gw_currencies.get(gw, set())
+        ngn_ok = 'NGN' in curs
+        usd_ok = 'USD' in curs
+        label = {'CYBERSOURCE': 'Cybersource', 'CHOICEPAY': 'ChoicePay/MPGS'}[gw]
+        status = '✅' if ngn_ok and usd_ok else '⚠️' if ngn_ok or usd_ok else '❌'
+        cur_label = f"NGN {'✅' if ngn_ok else '❌'}, USD {'✅' if usd_ok else '❌'}"
+        with req_cols[0]:
+            st.markdown(f"{status} **{label}** — {cur_label}")
+        with req_cols[1]:
+            files = [s['name'] for s in settlements if s['gateway'] == gw and s['status'] == 'OK']
+            st.caption(', '.join(set(files)) if files else '— missing —')
 
     # ── Detection table ───────────────────────────────────
     st.subheader('Detection Results')
-    rows = []
+    file_map = defaultdict(lambda: {'type': '—', 'gateway': '—', 'currencies': set(), 'status': 'OK'})
     if pelpay_file:
-        rows.append({'File': pelpay_file['name'], 'Type': 'Pelpay', 'Gateway': '—', 'Currency': '—', 'Status': 'OK'})
+        file_map[pelpay_file['name']] = {'type': 'Pelpay', 'gateway': '—', 'currencies': set(), 'status': 'OK'}
     for s in settlements:
-        gw = s['gateway'] if s['gateway'] else '—'
-        cu = s['currency'] if s['currency'] else '—'
-        rows.append({'File': s['name'], 'Type': 'Settlement' if s['gateway'] else '—', 'Gateway': gw, 'Currency': cu, 'Status': s['status']})
+        fm = file_map[s['name']]
+        fm['type'] = 'Settlement' if s['gateway'] else '—'
+        fm['gateway'] = s['gateway'] if s['gateway'] else '—'
+        if s['currency']: fm['currencies'].add(s['currency'])
+        if s['status'] != 'OK': fm['status'] = s['status']
+    rows = [{'File': k, 'Type': v['type'], 'Gateway': v['gateway'],
+             'Currency': ', '.join(sorted(v['currencies'])) if v['currencies'] else '—',
+             'Status': v['status']} for k, v in file_map.items()]
     st.table(rows)
 
     # ── Validation ───────────────────────────────────────
@@ -223,8 +232,14 @@ if uploaded_files:
         errors.append(f'{len(unknown)} file(s) could not be matched. '
                        'Cybersource files need: merchant_ref_number, amount, merchant_id. '
                        'ChoicePay files need: Order Reference, Order Amount, Merchant ID.')
-    if len(valid_settlements) < 4:
-        errors.append('Need all 4 settlement files (Cybersource NGN/USD + ChoicePay NGN/USD).')
+    for gw in gateways:
+        curs = gw_currencies.get(gw, set())
+        if 'NGN' not in curs and 'USD' not in curs:
+            errors.append(f'Missing {gw} file entirely.')
+        elif 'NGN' not in curs:
+            errors.append(f'Missing NGN currency in {gw} — upload file with NGN rows or add NGN file.')
+        elif 'USD' not in curs:
+            errors.append(f'Missing USD currency in {gw} — upload file with USD rows or add USD file.')
     for s in settlements:
         if s['gateway'] and s['currency'] == '?':
             errors.append(f'Could not determine currency for {s["name"]}. Rename file to include NGN or USD.')
