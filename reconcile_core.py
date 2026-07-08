@@ -116,6 +116,35 @@ def apply_formatting(wb):
                 elif isinstance(cell.value, int) and abs(cell.value) >= 100:
                     cell.number_format = AMT_FMT
 
+# ── Auto-detect date range from settlement files ────────
+def detect_date_range(settlement_files, schemas=None):
+    """Scan settlement files for their date columns and return (min_date, max_date).
+    settlement_files: list of (gateway_name, currency, file_path)
+    Returns (date, date) tuple or raises ValueError if no dates can be parsed."""
+    if schemas is None:
+        schemas = DEFAULT_SCHEMAS
+    all_dates = []
+    for gw, cur, fpath in settlement_files:
+        schema = schemas[gw]
+        s_headers, s_rows = load_file_rows(fpath)
+        s_idx = {h: i for i, h in enumerate(s_headers)}
+        date_col = schema.get('date')
+        if date_col and date_col in s_idx:
+            di = s_idx[date_col]
+        else:
+            for alt in ('batch_date', 'date', 'Order Date', 'transaction_date', 'Transaction Date'):
+                if alt in s_idx:
+                    di = s_idx[alt]
+                    break
+            else:
+                continue
+        for row in s_rows:
+            d = _parse_cell_date(row[di])
+            if d: all_dates.append(d)
+    if not all_dates:
+        raise ValueError('Could not detect any dates from settlement files.')
+    return (min(all_dates), max(all_dates))
+
 # ── Core reconciliation ──────────────────────────────────
 def load_pelpay(path):
     wb = openpyxl.load_workbook(path, data_only=True)
@@ -285,41 +314,54 @@ def date_label(d):
     return f"{ordinal(d.day)} {d.strftime('%B')} {d.strftime('%Y')}"
 
 # ── Workbook builders ────────────────────────────────────
+def _resolve_date_col(s_headers, schema):
+    """Find the date column in headers: prefer schema date, fallback to common names."""
+    preferred = schema.get('date')
+    if preferred and preferred in s_headers:
+        return s_headers.index(preferred)
+    for alt in ('batch_date', 'date', 'Order Date', 'transaction_date', 'Transaction Date'):
+        if alt in s_headers:
+            return s_headers.index(alt)
+    return None
+
+def _parse_cell_date(val):
+    """Parse a cell value to a date object."""
+    if isinstance(val, datetime): return val.date()
+    if isinstance(val, date): return val
+    if val:
+        raw = str(val).strip()
+        for fmt in ('%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
+                    '%B %d, %Y', '%m/%d/%Y %H:%M', '%m/%d/%Y', '%d/%m/%Y %H:%M', '%d/%m/%Y'):
+            try: return datetime.strptime(raw, fmt).date()
+            except: pass
+    return None
+
 def get_row_dates(sec):
     """Return dict mapping settlement row ref → date for a section."""
     schema = sec['schema']
     s_headers = sec['headers']
-    if schema.get('date') and schema['date'] in s_headers:
-        di = s_headers.index(schema['date'])
-        result = {}
-        for r in sec['rows']:
-            ref = norm(r[s_headers.index(schema['ref'])])
-            val = r[di]
-            d = None
-            if isinstance(val, datetime): d = val.date()
-            elif isinstance(val, date): d = val
-            elif val:
-                raw = str(val).strip()
-                for fmt in ('%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
-                            '%B %d, %Y', '%m/%d/%Y %H:%M', '%m/%d/%Y', '%d/%m/%Y %H:%M', '%d/%m/%Y'):
-                    try: d = datetime.strptime(raw, fmt).date(); break
-                    except: pass
-            result[ref] = d
-        return result
-    return {}
+    di = _resolve_date_col(s_headers, schema)
+    if di is None:
+        return {}
+    result = {}
+    for r in sec['rows']:
+        ref = norm(r[s_headers.index(schema['ref'])])
+        result[ref] = _parse_cell_date(r[di])
+    return result
 
 def _row_date_val(row, s_idx, schema):
     """Extract and parse date from a settlement row using the schema's date field."""
-    if schema.get('date') and schema['date'] in s_idx:
-        val = row[s_idx[schema['date']]]
-        if isinstance(val, datetime): return val.date()
-        if isinstance(val, date): return val
-        if val:
-            raw = str(val).strip()
-            for fmt in ('%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
-                        '%B %d, %Y', '%m/%d/%Y %H:%M', '%m/%d/%Y', '%d/%m/%Y %H:%M', '%d/%m/%Y'):
-                try: return datetime.strptime(raw, fmt).date()
-                except: pass
+    preferred = schema.get('date')
+    di = None
+    if preferred and preferred in s_idx:
+        di = s_idx[preferred]
+    else:
+        for alt in ('batch_date', 'date', 'Order Date', 'transaction_date', 'Transaction Date'):
+            if alt in s_idx:
+                di = s_idx[alt]
+                break
+    if di is not None:
+        return _parse_cell_date(row[di])
     return None
 
 def daily_stats_for_sec(sec, d, pel_by_ref):

@@ -7,13 +7,13 @@ Usage:
     python -m streamlit run app.py
 """
 import sys, os, tempfile, csv, io
-from datetime import date
+from datetime import date, datetime
 from collections import defaultdict
 import streamlit as st
 import openpyxl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from reconcile_core import run, DEFAULT_SCHEMAS
+from reconcile_core import run, DEFAULT_SCHEMAS, detect_date_range
 
 st.set_page_config(page_title='Reconciliation App', layout='wide')
 st.title('Gateway ↔ Pelpay Settlement Reconciliation')
@@ -95,12 +95,9 @@ def currency_from_filename(fpath):
         return 'USD'
     return None
 
-# ── Sidebar — date only ──────────────────────────────────
-st.sidebar.header('Configuration')
-settlement_date = st.sidebar.date_input(
-    'Settlement Date',
-    value=date.today(),
-)
+# ── Sidebar — status only ───────────────────────────────
+st.sidebar.header('Status')
+detected_range = st.sidebar.empty()  # filled after auto-detection
 
 # ── Main — upload everything ─────────────────────────────
 st.subheader('Upload Files')
@@ -252,17 +249,30 @@ if uploaded_files:
 
     # ── Run ──────────────────────────────────────────────
     if not errors and pelpay_file:
+        settle_items = [(s['gateway'], s['currency'], s['path']) for s in valid_settlements]
+
+        # Auto-detect date range from settlement files
+        try:
+            dr = detect_date_range(settle_items)
+            date_min, date_max = dr
+            date_label = f"{date_min.strftime('%d %b %Y')} – {date_max.strftime('%d %b %Y')}"
+            detected_range.info(f'Detected settlement range: {date_label}')
+        except Exception as e:
+            detected_range.error(f'Could not detect dates: {e}')
+            dr = None
+
         if st.button('Run Reconciliation', type='primary'):
+            if dr is None:
+                st.error('Cannot run without a valid date range. Check settlement files.')
+                st.stop()
             tmpdir = tempfile.mkdtemp()
             try:
                 pel_path = pelpay_file['path']
-                settle_items = [(s['gateway'], s['currency'], s['path']) for s in valid_settlements]
 
-                date_str = settlement_date.strftime('%Y-%m-%d')
-                out_path = os.path.join(tmpdir, f'Reconciliation_{date_str}_MD_Format.xlsx')
+                out_path = os.path.join(tmpdir, f'Reconciliation_{date_min.strftime("%Y-%m-%d")}_{date_max.strftime("%Y-%m-%d")}_MD_Format.xlsx')
 
                 with st.spinner('Running reconciliation…'):
-                    result = run(pel_path, settle_items, settlement_date, out_path)
+                    result = run(pel_path, settle_items, dr, out_path)
 
                 st.success('Reconciliation complete!')
                 c1, c2, c3 = st.columns(3)
@@ -288,15 +298,15 @@ else:
 # ── Guide ────────────────────────────────────────────────
 with st.expander('How to use'):
     st.markdown('''
-1. Set the **Settlement Date** in the sidebar.
- 2. **Upload all .xlsx / .csv files** — Pelpay + settlement files, all at once.  
+ 1. **Upload all .xlsx / .csv files** — Pelpay + settlement files, all at once.  
    The app auto-detects:
     - **Pelpay file** (needs: Processor Reference, Merchant Name)
     - **Cybersource files** (needs: merchant_ref_number, amount, merchant_id)
     - **ChoicePay files** (needs: Order Reference, Order Amount, Merchant ID)
     - **MPGS files** (needs: Processor Reference, Settlement Amount, Merchant Code)
     - **Currency** from file content or filename (NGN / USD)
-3. Review the detection table.
-4. Click **Run Reconciliation**.
-5. Download the output workbook.
+    - **Settlement date range** from the files themselves
+ 2. Review the detection table and the auto-detected date range in the sidebar.
+ 3. Click **Run Reconciliation**.
+ 4. Download the output workbook.
     ''')
