@@ -186,27 +186,70 @@ def in_date_range(dt, date_range):
         return date_range[0] <= d <= date_range[1]
     return d == date_range
 
+def _header_tokens():
+    """Every column name the app expects across gateways + Pelpay, lowercased."""
+    toks = set()
+    for sch in DEFAULT_SCHEMAS.values():
+        for key in ('ref', 'amount', 'merchant_field', 'currency', 'status', 'date'):
+            v = sch.get(key)
+            if v:
+                toks.add(str(v).strip().lower())
+    for f in PELPAY_FIELDS:
+        toks.add(str(f).strip().lower())
+    for lst in PELPAY_ALIASES.values():
+        for f in lst:
+            toks.add(str(f).strip().lower())
+    return toks
+
+
+def _header_score(cells, tokens):
+    labels = {str(v).strip().lower() for v in cells if v is not None and str(v).strip()}
+    return len(labels & tokens)
+
+
+def _is_metadata(cells):
+    combined = ' '.join(str(v or '') for v in cells)
+    return any(kw in combined for kw in ['chamswitch', 'Report_', 'Daily_Classic'])
+
+
 def _find_header_row(ws):
-    """Scan worksheet rows to find the actual header row, skipping metadata rows."""
+    """Locate the real header row of a worksheet by finding the row that contains
+    the most known column names (metadata rows contain none). Falls back to the
+    first plausible non-metadata row if nothing matches."""
+    tokens = _header_tokens()
+    best = (0, None, None)
+    scan = min(ws.max_row + 1, 16)
+    for rnum in range(1, scan):
+        row = [ws.cell(rnum, c).value for c in range(1, ws.max_column + 1)]
+        if sum(1 for v in row if v is not None and str(v).strip()) < 3:
+            continue
+        score = _header_score(row, tokens)
+        if score > best[0]:
+            best = (score, rnum, [str(v).strip() if v is not None else '' for v in row])
+    if best[0] >= 2:
+        return best[2], best[1]
     for rnum in range(1, min(ws.max_row + 1, 11)):
         row = [ws.cell(rnum, c).value for c in range(1, ws.max_column + 1)]
-        non_empty = sum(1 for v in row if v is not None and str(v).strip())
-        if non_empty < 3:
-            continue
-        combined = ' '.join(str(v or '') for v in row)
-        if any(kw in combined for kw in ['chamswitch', 'Report_', 'Daily_Classic']):
+        if sum(1 for v in row if v is not None and str(v).strip()) < 3 or _is_metadata(row):
             continue
         return [str(v).strip() if v is not None else '' for v in row], rnum
     raise ValueError('Could not find header row in file')
 
+
 def _find_header_row_list(all_rows):
-    """Find the real header row in a list of CSV rows, skipping metadata rows."""
-    for i, row in enumerate(all_rows[:10]):
-        non_empty = sum(1 for v in row if v is not None and str(v).strip())
-        if non_empty < 3:
+    """Same header detection for a list of CSV rows."""
+    tokens = _header_tokens()
+    best = (0, None, None)
+    for i, row in enumerate(all_rows[:16]):
+        if sum(1 for v in row if v is not None and str(v).strip()) < 3:
             continue
-        combined = ' '.join(str(v or '') for v in row)
-        if any(kw in combined for kw in ['chamswitch', 'Report_', 'Daily_Classic']):
+        score = _header_score(row, tokens)
+        if score > best[0]:
+            best = (score, i, [str(v).strip() if v is not None else '' for v in row])
+    if best[0] >= 2:
+        return best[2], best[1]
+    for i, row in enumerate(all_rows[:10]):
+        if sum(1 for v in row if v is not None and str(v).strip()) < 3 or _is_metadata(row):
             continue
         return [str(v).strip() if v is not None else '' for v in row], i
     raise ValueError('Could not find header row in file')
