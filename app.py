@@ -221,7 +221,10 @@ if uploaded_files:
     st.table(rows)
 
     # ── Validation ───────────────────────────────────────
-    errors = []
+    # errors BLOCK the run; warnings are informational. A currency being absent
+    # (e.g. the NGN merchant had issues that day) is a warning, not a blocker —
+    # the app still reconciles whatever currencies/gateways are present.
+    errors, warnings = [], []
     if not pelpay_file:
         errors.append('No Pelpay file detected. Must contain: Processor Reference, Merchant Name')
     valid_settlements = [s for s in settlements if s['gateway'] and s['status'] == 'OK' and s['currency'] and s['currency'] != '?']
@@ -230,21 +233,24 @@ if uploaded_files:
         errors.append(f'{len(unknown)} file(s) could not be matched. '
                        'Cybersource files need: merchant_ref_number, amount, merchant_id. '
                        'ChoicePay files need: Order Reference, Order Amount, Merchant ID.')
+    if not valid_settlements:
+        errors.append('No settlement files with recognised data were detected.')
     for gw in gateways:
         curs = gw_currencies.get(gw, set())
         if 'NGN' not in curs and 'USD' not in curs:
-            errors.append(f'Missing {gw} file entirely.')
+            warnings.append(f'No {gw} file this run — reconciling without it.')
         elif 'NGN' not in curs:
-            errors.append(f'Missing NGN currency in {gw} — upload file with NGN rows or add NGN file.')
+            warnings.append(f'No NGN rows for {gw} this run — reconciling USD only for it.')
         elif 'USD' not in curs:
-            errors.append(f'Missing USD currency in {gw} — upload file with USD rows or add USD file.')
+            warnings.append(f'No USD rows for {gw} this run — reconciling NGN only for it.')
     for s in settlements:
         if s['gateway'] and s['currency'] == '?':
             errors.append(f'Could not determine currency for {s["name"]}. Rename file to include NGN or USD.')
 
-    if errors:
-        for e in errors:
-            st.warning(e)
+    for w in warnings:
+        st.warning(w)
+    for e in errors:
+        st.error(e)
 
     st.divider()
 
