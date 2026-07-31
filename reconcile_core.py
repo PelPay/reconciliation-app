@@ -296,6 +296,19 @@ def load_settlements(pel_by_ref, settlement_files, date_range, schemas=None):
         s_headers, s_rows = load_file_rows(fpath)
         s_idx = {h: i for i, h in enumerate(s_headers)}
 
+        # Guard: make sure this is actually a settlement/batch export for this gateway.
+        # (A CyberSource *Transaction Detail Report* has merchant_ref_number/amount but
+        #  no settlement 'status' column, and would otherwise crash with a raw KeyError.)
+        required = [schema[k] for k in ('ref', 'amount', 'status', 'merchant_field') if schema.get(k)]
+        missing = [c for c in required if c not in s_idx]
+        if missing:
+            fname = os.path.basename(fpath)
+            raise ValueError(
+                f"'{fname}' does not look like a {gw} settlement report — "
+                f"missing column(s): {', '.join(missing)}. "
+                f"Expected the settlement/batch export (e.g. columns "
+                f"{', '.join(required)}), not the Transaction Detail Report.")
+
         approved = [r for r in s_rows if r[s_idx[schema['status']]] in schema['approved_statuses']]
         grp = defaultdict(list)
         use_file_currency = schema.get('currency') and schema['currency'] in s_headers
