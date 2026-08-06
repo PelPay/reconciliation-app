@@ -13,7 +13,7 @@ import streamlit as st
 import openpyxl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from reconcile_core import run, DEFAULT_SCHEMAS, detect_date_range, _find_header_row
+from reconcile_core import run, DEFAULT_SCHEMAS, detect_date_range, _find_header_row, _find_header_row_list
 
 st.set_page_config(page_title='Reconciliation App', layout='wide')
 st.title('Gateway ↔ Pelpay Settlement Reconciliation')
@@ -66,13 +66,14 @@ def read_currencies_from_file(fpath, cur_col_header, header_row=1):
     try:
         if ext == '.csv':
             with open(fpath, encoding='utf-8-sig', newline='') as fh:
-                reader = csv.reader(fh)
-                h = [str(c).strip().lower() for c in next(reader, [])]
-                if cur_col_header in h:
-                    ci = h.index(cur_col_header)
-                    for row in reader:
-                        if row and len(row) > ci and row[ci]:
-                            currencies.add(str(row[ci]).strip().upper())
+                all_rows = list(csv.reader(fh))
+            h_raw, hi = _find_header_row_list(all_rows)  # skips leading metadata rows
+            h = [str(c).strip().lower() for c in h_raw]
+            if cur_col_header in h:
+                ci = h.index(cur_col_header)
+                for row in all_rows[hi + 1:]:
+                    if row and len(row) > ci and row[ci]:
+                        currencies.add(str(row[ci]).strip().upper())
         else:
             wb = openpyxl.load_workbook(fpath, data_only=True)
             ws = wb[wb.sheetnames[0]]
@@ -125,8 +126,9 @@ if uploaded_files:
             header_row = 1
             if ext == '.csv':
                 with open(tpath, encoding='utf-8-sig', newline='') as fh:
-                    reader = csv.reader(fh)
-                    hdrs = next(reader, [])
+                    all_rows = list(csv.reader(fh))
+                hdrs, hi = _find_header_row_list(all_rows)  # skips leading metadata rows
+                header_row = hi + 1  # 1-based, for read_currencies_from_file
             else:
                 wb = openpyxl.load_workbook(tpath, data_only=True)
                 ws = wb[wb.sheetnames[0]]
